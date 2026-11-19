@@ -12,7 +12,8 @@ int main()
     //1. Create Socket
     int clientSock_fd = socket(AF_INET, SOCK_STREAM, 0);
     if(clientSock_fd < 0){
-        std::cout<<"Socket creation failed\n";
+        perror("Socket creation failed\n");
+        return 1;
     }
 
     sockaddr_in serverAddr;
@@ -30,7 +31,7 @@ int main()
     int ret = connect(clientSock_fd, reinterpret_cast<sockaddr*>(&serverAddr), 
                sizeof(serverAddr));
     if(ret<0){
-        std::cout<<"connect failed\n";
+        std::cerr<<"connect failed\n";
 	    close(clientSock_fd);
 	    return 1;
     }else{
@@ -43,12 +44,12 @@ int main()
     	//3. Transmit a message to another connected Socket
     	bytesSent = send(clientSock_fd, message, strlen(message), 0);
 
-        if(bytesSent<0){
-                perror("Send call failed");
-        }else{
-                std::cout<<"Message sent,bytes sent:"<<bytesSent<<"\n";
-        }
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+   	if(bytesSent<0){
+       	    perror("Send call failed");
+   	}else{
+       	    std::cout<<"Message sent,bytes sent:"<<bytesSent<<"\n";
+   	}
+	std::this_thread::sleep_for(std::chrono::seconds(2));
     }
 
     close(clientSock_fd);

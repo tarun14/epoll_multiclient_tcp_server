@@ -1,1 +1,1 @@
-This is epoll multithreading based multiclient server project.
+A Linux TCP server using nonblocking sockets and epoll to handle multiple clients in a single-threaded event loop, with two clients that periodically send messages.
