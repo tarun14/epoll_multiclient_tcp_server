@@ -17,8 +17,72 @@
 
 #define MAX_EVENTS 10
 
+class client{
+       public:
+        int clientSockfd;
+        client(): clientSockfd(-1){}
+        explicit client(int fd): clientSockfd(fd){}
+
+        client(client &&clref) noexcept{
+            if(this != &clref){
+                clientSockfd = std::move(clref.clientSockfd);
+                clref.clientSockfd = -1;
+            }
+        }
+        client& operator=(client &&clref) noexcept{
+            if(this != &clref){
+                if(clientSockfd >= 0){
+                    close(clientSockfd);
+                }
+                clientSockfd = std::move(clref.clientSockfd);
+                clref.clientSockfd = -1;
+            }
+            return *this;
+        }
+        //Copy constructor is invalidated
+        client(const client&) = delete;
+        //Copy assignment operator is invalidated
+        client& operator=(const client&) = delete;
+
+        ~client(){
+            if(clientSockfd >= 0){
+                close(clientSockfd);
+                clientSockfd = -1;
+            }
+        }
+};
+
+class server{
+       public:
+        int servSockfd;//Server socket fd
+        int signalfd;//signal fd
+        int epfd;//epoll fd
+        std::vector<client> clientSockfd;
+        server(){
+            servSockfd = -1;
+            signalfd = -1;
+            epfd = -1;
+
+        }
+        ~server(){
+            if(servSockfd>=0){
+                close(servSockfd);
+                servSockfd = -1;
+            }
+            if(signalfd>=0){
+                close(signalfd);
+                signalfd = -1;
+            }
+            if(epfd>=0){
+                close(epfd);
+                epfd = -1;
+            }
+        }
+};
+
 int main()
 {
+    server srv;
     bool running=true;
     sigset_t signalMask;
     if (sigemptyset(&signalMask) == -1 ||
@@ -34,36 +98,36 @@ int main()
         return 1;
     }
 
+    srv.signalfd = signalFd;
+
     //1. Create server socket
     int servSockfd = socket(AF_INET, SOCK_STREAM, 0);
     if(servSockfd < 0){
         std::cerr<<"socket creation failed!\n";
-        close(signalFd);
-        return 1;
-    }
-
-    //servSockfd is marked 'nonblocking' so that 'accept' doesn't block
-    //the call flow if no pending connections are there in queue. It
-    //fails and returns immediately with 'EAGAIN' or 'EWOULDBLOCK'
-    int flags = fcntl(servSockfd, F_GETFL);
-    if (flags == -1) {
-        int err=errno;
-        std::cerr<<"fcntl(F_GETFL) failed with error:("<<err<<") :"
-                 <<std::strerror(err)<<std::endl;
-        close(signalFd);
-        close(servSockfd);
-        return 1;
-    }
-    if(fcntl(servSockfd, F_SETFL, flags | O_NONBLOCK) == -1){
-        int err=errno;
-        std::cerr<<"fcntl(F_SETFL) failed with error:("<<err<<") :"
-                 <<std::strerror(err)<<std::endl;
-        close(signalFd);
-        close(servSockfd);
         return 1;
     }
 
     std::cout<<"Socket call succesfull\n";
+
+    srv.servSockfd = servSockfd;
+
+    //servSockfd is marked 'nonblocking' so that 'accept' doesn't block
+    //the call flow if no pending connections are there in queue. It
+    //fails and returns immediately with 'EAGAIN' or 'EWOULDBLOCK'
+    int flags = fcntl(srv.servSockfd, F_GETFL);
+    if (flags == -1) {
+        int err=errno;
+        std::cerr<<"fcntl(F_GETFL) failed with error:("<<err<<") :"
+                 <<std::strerror(err)<<std::endl;
+        return 1;
+    }
+    if(fcntl(srv.servSockfd, F_SETFL, flags | O_NONBLOCK) == -1){
+        int err=errno;
+        std::cerr<<"fcntl(F_SETFL) failed with error:("<<err<<") :"
+                 <<std::strerror(err)<<std::endl;
+        return 1;
+    }
+
     //2. Configure server address
     sockaddr_in servaddress{};
     servaddress.sin_family = AF_INET;
@@ -84,16 +148,12 @@ int main()
             sizeof(servaddress)) < 0){
         std::cerr<<"bind call failed\n";
         perror("bind failed");
-        close(signalFd);
-        close(servSockfd);
         return 1;
     }
     std::cout<<"bind call successfull\n";
     //4. listen for connection request
     if(listen(servSockfd, 5) < 0){
         std::cerr<<"listen call failed\n";
-        close(signalFd);
-        close(servSockfd);
         return 1;
     }
     std::cout<<"listen call successfull\n";
@@ -101,41 +161,33 @@ int main()
     int epfd = epoll_create1(0);
     if(epfd == -1){
         std::cerr<<"epoll_create1 failed\n";
-        close(signalFd);
-        close(servSockfd);
         return 1;
     }
 
     std::cout<<"epoll_create1 successfull\n";
 
+    srv.epfd = epfd;
+
     epoll_event signalEvent{};
     signalEvent.events = EPOLLIN;
-    signalEvent.data.fd = signalFd;
+    signalEvent.data.fd = srv.signalfd;
 
-    if (epoll_ctl(epfd, EPOLL_CTL_ADD, signalFd, &signalEvent) == -1) {
+    if (epoll_ctl(srv.epfd, EPOLL_CTL_ADD, srv.signalfd, &signalEvent) == -1) {
         perror("epoll_ctl signalFd");
-        close(signalFd);
-        close(servSockfd);
-        close(epfd);
         return 1;
     }
 
     epoll_event ev{}, events[MAX_EVENTS];
     ev.events = EPOLLIN;
-    ev.data.fd = servSockfd;
+    ev.data.fd = srv.servSockfd;
 
     //6. Add entry for servSockfd to interest list of epoll instance(epfd).
     // we ask kernel to look for any connection request for servSockfd
-    if(epoll_ctl(epfd, EPOLL_CTL_ADD, servSockfd, &ev) < 0){
+    if(epoll_ctl(srv.epfd, EPOLL_CTL_ADD, srv.servSockfd, &ev) < 0){
         std::cerr<<"epoll_ctl failed for adding servSockfd\n";
-        close(signalFd);
-        close(epfd);
-        close(servSockfd);
         return 1;
     }
     std::cout<<"epoll_ctl call successfull\n";
-
-    std::vector<int> clientSockets;
 
     while(running){
         //7. Keep waiting indefinitely for any event for file descriptors
@@ -144,30 +196,23 @@ int main()
         // descriptors are present in epfd interest list. Hence waiting will be done for
         // any events for these fds. Returns number of fds ready for requested I/O
         // operation.
-        int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
+        int nfds = epoll_wait(srv.epfd, events, MAX_EVENTS, -1);
         if(nfds < 0){
             std::cerr<<"epoll_wait failed\n";
             if(errno == EINTR){
                 continue; // since SIGINT, SIGTERM are blocked this is not normal shutdown path
             }
-            close(signalFd);
-            close(epfd);
-            close(servSockfd);
-            for (int fd : clientSockets){
-                close(fd);
-            }
-            clientSockets.clear();
             return 1;
         }
         std::cout<<"epoll_wait returned, nfds:"<<nfds<<"\n";
 
         for(int i=0; i<nfds; i++){
-            if (events[i].data.fd == signalFd) {
+            if (events[i].data.fd == srv.signalfd) {
                 signalfd_siginfo info{};
                 ssize_t n;
 
                 do {
-                    n = read(signalFd, &info, sizeof(info));
+                    n = read(srv.signalfd, &info, sizeof(info));
                 } while (n == -1 && errno == EINTR);
 
                 if (n == sizeof(info)) {
@@ -184,12 +229,12 @@ int main()
                 break;
             }
             // Event: connection request on server socket or data on client socket
-            else if(events[i].data.fd == servSockfd){
+            else if(events[i].data.fd == srv.servSockfd){
                 std::cout<<"connection request for server\n";
                 //The drain loop 1: it accepts all incoming connection requests
                 //till 'accept' reports EAGAIN/EWOULDBLOCK
                 while(true){
-                    int clientSockfd = accept(servSockfd, nullptr, nullptr);
+                    int clientSockfd = accept(srv.servSockfd, nullptr, nullptr);
                     if(clientSockfd < 0){
                         if(errno == EINTR){
                             continue;
@@ -206,7 +251,12 @@ int main()
                         break;
                     }
 
+                    client accepted(clientSockfd);
                     std::cout<<"accept call successfull for server connection request\n";
+
+                    //will create a new client and pass clientSockfd to its constructor
+                    srv.clientSockfd.emplace_back(std::move(accepted));
+
                     //clientSockfd is marked 'nonblocking' so that 'read' doesn't block
                     //the call flow if no more data is there in queue. It
                     //fails and returns immediately with 'EAGAIN' or 'EWOULDBLOCK'
@@ -215,33 +265,30 @@ int main()
                         int err=errno;
                         std::cerr<<"fcntl(F_GETFL) clientSockfd failed with error:("<<err<<") :"
                                 <<std::strerror(err)<<std::endl;
-                        close(clientSockfd);
+                        srv.clientSockfd.pop_back();//remove the appended client
                         continue;
                     }
                     if(fcntl(clientSockfd, F_SETFL, clientflags | O_NONBLOCK) == -1){
                         int err=errno;
                         std::cerr<<"fcntl(F_SETFL) clientSockfd failed with error:("<<err<<") :"
                                 <<std::strerror(err)<<std::endl;
-                        close(clientSockfd);
+                        srv.clientSockfd.pop_back();//remove the appended client
                         continue;
                     }
 
-                    clientSockets.push_back(clientSockfd);
 
                     epoll_event clientEv{};
                     //Client Sockets events are configured as 'edge-triggered' (EPOLLET)
                     clientEv.events = EPOLLIN | EPOLLRDHUP | EPOLLET;
                     clientEv.data.fd = clientSockfd;
-                    if(epoll_ctl(epfd, EPOLL_CTL_ADD, clientSockfd, &clientEv) < 0){
+                    if(epoll_ctl(srv.epfd, EPOLL_CTL_ADD, clientSockfd, &clientEv) < 0){
                         perror("epoll_ctl failed for adding clientSockfd");
-                        close(clientSockfd);
-                        clientSockets.pop_back();
+                        srv.clientSockfd.pop_back();//remove the appended client
                         continue;
                     }
                 }
             }else{
                 char buf[512];
-                int clientSockfd = events[i].data.fd;
                 const uint32_t revents = events[i].events;
                 const bool terminalEvent =
                     revents & (EPOLLERR | EPOLLHUP | EPOLLRDHUP);
@@ -250,11 +297,11 @@ int main()
                     int socketError = 0;
                     socklen_t len = sizeof(socketError);
 
-                    if (getsockopt(clientSockfd, SOL_SOCKET, SO_ERROR,
+                    if (getsockopt(events[i].data.fd, SOL_SOCKET, SO_ERROR,
                                 &socketError, &len) == -1) {
                         perror("getsockopt(SO_ERROR)");
                     } else if (socketError != 0) {
-                        std::cerr << "Socket error on fd " << clientSockfd
+                        std::cerr << "Socket error on fd " << events[i].data.fd
                                 << ": " << std::strerror(socketError) << '\n';
                     }
                 }
@@ -262,7 +309,7 @@ int main()
                 bool closeClient = false;
 
                 for (;;) {
-                    ssize_t n = read(clientSockfd, buf, sizeof(buf));
+                    ssize_t n = read(events[i].data.fd, buf, sizeof(buf));
 
                     if (n > 0) {
                         std::cout << "Data read from client:"
@@ -292,13 +339,17 @@ int main()
                 }
 
                 if (closeClient) {
-                    if (epoll_ctl(epfd, EPOLL_CTL_DEL, clientSockfd, nullptr) == -1) {
+                    if (epoll_ctl(srv.epfd, EPOLL_CTL_DEL, events[i].data.fd, nullptr) == -1) {
                         perror("epoll_ctl(DEL)");
                     }
-                    close(clientSockfd);
-                    clientSockets.erase(
-                        std::remove(clientSockets.begin(), clientSockets.end(), clientSockfd),
-                        clientSockets.end());
+                    //Delete this specific client from vector
+                    for(auto it=srv.clientSockfd.begin();it!=srv.clientSockfd.end();){
+                        if(it->clientSockfd == events[i].data.fd){
+                            it = srv.clientSockfd.erase(it);
+                            break;
+                        }
+                        ++it;
+                    }
                 }
             }
         }//For loop
@@ -306,11 +357,6 @@ int main()
 
     if(!running){
         std::cerr<<"Server is stopping, closing epoll fd, server socket and client sockets...\n";
-    }
-    close(epfd);
-    close(servSockfd);
-    for(int clientSockfd : clientSockets){
-        close(clientSockfd);
     }
 
     return 0;

@@ -7,12 +7,47 @@
 #include <thread>
 #include <chrono>
 
+class client{
+       public:
+        int clientSockfd;
+        client(): clientSockfd(-1){}
+        explicit client(int fd): clientSockfd(fd){}
+
+        client(client &&clref) noexcept{
+            if(this != &clref){
+                clientSockfd = std::move(clref.clientSockfd);
+                clref.clientSockfd = -1;
+            }
+        }
+        client& operator=(client &&clref) noexcept{
+            if(this != &clref){
+                if(clientSockfd >= 0){
+                    close(clientSockfd);
+                }
+                clientSockfd = std::move(clref.clientSockfd);
+                clref.clientSockfd = -1;
+            }
+            return *this;
+        }
+        //Copy constructor is invalidated
+        client(const client&) = delete;
+        //Copy assignment operator is invalidated
+        client& operator=(const client&) = delete;
+
+        ~client(){
+            if(clientSockfd >= 0){
+                close(clientSockfd);
+                clientSockfd = -1;
+            }
+        }
+};
+
 int main()
 {
     //1. Create Socket
-    int clientSock_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if(clientSock_fd < 0){
-        perror("Socket creation failed\n");
+    client cl(socket(AF_INET, SOCK_STREAM, 0));
+    if(cl.clientSockfd < 0){
+        std::cerr<<"Socket creation failed\n";
         return 1;
     }
 
@@ -22,27 +57,22 @@ int main()
     serverAddr.sin_port = htons(8080);
     if(inet_pton(AF_INET, "127.0.0.1", &serverAddr.sin_addr) <= 0){
         std::cerr<<"inet_pton failed\n";
-        close(clientSock_fd);
         return 1;
     }
 
     //2. Initiates a connection request on a socket. It connects the socket fd to the mentioned sockaddr
     // address
-    int ret = connect(clientSock_fd, reinterpret_cast<sockaddr*>(&serverAddr), 
-               sizeof(serverAddr));
-    if(ret<0){
+    if (connect(cl.clientSockfd, reinterpret_cast<sockaddr*>(&serverAddr), 
+               sizeof(serverAddr))<0){
         std::cerr<<"connect failed\n";
-	    close(clientSock_fd);
 	    return 1;
-    }else{
-        std::cout<<"connect call successful\n";
     }
 
     const char* message = "hello! Server, from client1\n";
     int bytesSent=0;
     while(true){
     	//3. Transmit a message to another connected Socket
-    	bytesSent = send(clientSock_fd, message, strlen(message), 0);
+	bytesSent = send(cl.clientSockfd, message, strlen(message), 0);
 
    	if(bytesSent<0){
        	    perror("Send call failed");
@@ -51,8 +81,6 @@ int main()
    	}
 	std::this_thread::sleep_for(std::chrono::seconds(2));
     }
-
-    close(clientSock_fd);
 
     return 0;
 }
